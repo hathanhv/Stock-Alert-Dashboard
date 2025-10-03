@@ -1,0 +1,10 @@
+[
+    "price_vs_ema50", "price_vs_ema200", "ema_ratio",
+    "macd_signal_strength", "macd_trend", "trend_score",
+    "rsi", "mfi", "bb_pos", "vol_ratio",
+    "rsi_overbought", "rsi_oversold", "mfi_momentum",
+    "volume_momentum", "momentum_score",
+    "PE", "PB", "ROE", "EPS", "RevenueGrowth", "ProfitGrowth",
+    "pe_normalized", "pb_normalized", "growth_score",
+    "roe_quality", "value_score"
+  ]

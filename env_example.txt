@@ -1,0 +1,8 @@
+# FiinQuantX Credentials
+USERNAME1=DSTC_37@fiinquant.vn
+PASSWORD1=Fiinquant0606
+
+# Optional: Additional configuration
+# MODEL_UPDATE_FREQUENCY=monthly
+# MAX_CONCURRENT_STREAMS=10
+# LOG_LEVEL=INFO
