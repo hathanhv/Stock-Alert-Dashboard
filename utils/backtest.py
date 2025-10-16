@@ -25,6 +25,7 @@ class Backtester:
         """
         self.initial_capital = initial_capital or Config.INITIAL_CAPITAL
         self.commission_rate = commission_rate or Config.COMMISSION_RATE
+        self.allow_short = False
         self.reset()
     
     def reset(self):
@@ -113,6 +114,37 @@ class Backtester:
                     'executed': True
                 })
                 
+                self.position = 0
+            elif signal == 'SELL' and self.position == 0 and self.allow_short:
+                # Open short position: borrow shares and sell now
+                if quantity is None:
+                    quantity = int(self.capital / price)
+                trade_value = quantity * price
+                commission = self.calculate_commission(trade_value)
+                # Receive proceeds from short sale
+                self.capital += (trade_value - commission)
+                self.position = -quantity
+                trade.update({
+                    'quantity': -quantity,
+                    'value': trade_value,
+                    'commission': commission,
+                    'executed': True,
+                    'short_open': True
+                })
+            elif signal == 'BUY' and self.position < 0 and self.allow_short:
+                # Cover short position
+                quantity = -self.position
+                trade_value = quantity * price
+                commission = self.calculate_commission(trade_value)
+                # Pay to buy back shares
+                self.capital -= (trade_value + commission)
+                trade.update({
+                    'quantity': quantity,
+                    'value': -trade_value,
+                    'commission': commission,
+                    'executed': True,
+                    'short_close': True
+                })
                 self.position = 0
             
             else:

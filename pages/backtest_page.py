@@ -56,6 +56,10 @@ def generate_signals_for_backtest(data, financial_data, ticker):
     """Generate signals for backtesting"""
     try:
         signals = []
+        probabilities = []
+        skipped_warmup = 0
+        skipped_empty_features = 0
+        min_warmup = st.session_state.get('min_warmup_bars', 50)
         
         # Calculate technical indicators
         technical_data = st.session_state.technical_indicators.calculate_all_indicators(data)
@@ -69,8 +73,10 @@ def generate_signals_for_backtest(data, financial_data, ticker):
             # Calculate indicators for current data
             current_technical = st.session_state.technical_indicators.calculate_all_indicators(current_data)
             
-            if current_technical.empty or len(current_technical) < 50:  # Need enough data
+            if current_technical.empty or len(current_technical) < min_warmup:  # Need enough data
                 signals.append('HOLD')
+                probabilities.append(np.nan)
+                skipped_warmup += 1
                 continue
             
             # Prepare prediction data
@@ -80,6 +86,8 @@ def generate_signals_for_backtest(data, financial_data, ticker):
             
             if prediction_data.empty:
                 signals.append('HOLD')
+                probabilities.append(np.nan)
+                skipped_empty_features += 1
                 continue
             
             # Get technical indicators for signal generation
@@ -96,7 +104,18 @@ def generate_signals_for_backtest(data, financial_data, ticker):
             )
             
             signals.append(signal_info['signal'])
+            probabilities.append(probability)
+            try:
+                st.session_state.last_prediction_row = prediction_data.iloc[-1:].copy()
+            except Exception:
+                pass
         
+        # Save debug info in session state
+        st.session_state.signal_debug = {
+            'skipped_warmup': skipped_warmup,
+            'skipped_empty_features': skipped_empty_features,
+            'probabilities': pd.Series(probabilities, index=data.index)
+        }
         return pd.Series(signals, index=data.index)
         
     except Exception as e:
@@ -380,9 +399,36 @@ def main():
         step=0.05
     )
     
+    # Toggle for technical filters
+    apply_technical_filters = st.sidebar.checkbox(
+        "Apply technical filters (RSI, MACD, Bollinger, Volume)",
+        value=True,
+        help="If disabled, signals use only model probability without technical filters"
+    )
+
+    # Diagnostics controls
+    min_warmup_bars = st.sidebar.number_input(
+        "Minimum warmup bars for indicators",
+        min_value=10,
+        max_value=200,
+        value=50,
+        step=5,
+        help="Bars required before generating signals to ensure stable indicators"
+    )
+
+    # Short selling toggle
+    allow_short = st.sidebar.checkbox(
+        "Allow short selling",
+        value=False,
+        help="If enabled: open short on SELL when flat, cover on BUY"
+    )
+    
     # Update signal generator and backtester
     st.session_state.signal_generator.buy_threshold = buy_threshold
     st.session_state.signal_generator.sell_threshold = sell_threshold
+    st.session_state.signal_generator.enable_technical_filters = apply_technical_filters
+    st.session_state.min_warmup_bars = min_warmup_bars
+    st.session_state.backtester.allow_short = allow_short
     st.session_state.backtester.initial_capital = initial_capital
     st.session_state.backtester.commission_rate = commission_rate
     
@@ -447,7 +493,9 @@ def main():
                     return
 
                 # DEBUG: preview OHLCV after normalization
-                debug_cols = [c for c in ['Open','High','Low','Close','MatchVolume','open','high','low','close','volume'] if c in historical_data.columns]
+                # debug_cols = [c for c in ['Open','High','Low','Close','MatchVolume','open','high','low','close','volume'] if c in historical_data.columns]
+                debug_cols = [c for c in ['Open','High','Low','Close','MatchVolume'] if c in historical_data.columns]
+            
                 st.caption("Preview OHLCV after filtering (tail 5):")
                 st.dataframe(historical_data[debug_cols].tail(5))
                 
@@ -462,6 +510,35 @@ def main():
                 vc = signals.value_counts(dropna=False)
                 st.caption("Signal distribution:")
                 st.write(vc)
+                # Show diagnostics if available
+                debug = st.session_state.get('signal_debug')
+                if debug:
+                    st.caption("Signal diagnostics:")
+                    col_a, col_b, col_c = st.columns(3)
+                    with col_a:
+                        st.metric("Skipped warmup", int(debug.get('skipped_warmup', 0)))
+                    with col_b:
+                        st.metric("Empty features rows", int(debug.get('skipped_empty_features', 0)))
+                    with col_c:
+                        valid_probs = debug['probabilities'].dropna() if hasattr(debug.get('probabilities'), 'dropna') else []
+                        st.metric("Valid prob points", int(len(valid_probs)))
+                    # Optional: show probability time series preview
+                    if hasattr(debug.get('probabilities'), 'tail'):
+                        st.line_chart(debug['probabilities'])
+                    if 'last_prediction_row' in st.session_state:
+                        st.caption("Latest feature row used for prediction (ordered):")
+                        st.dataframe(st.session_state.last_prediction_row, use_container_width=True)
+                        # Show prediction feature debug if available
+                        dbg = st.session_state.get('prediction_feature_debug')
+                        if dbg:
+                            st.caption("Prediction feature debug info:")
+                            st.write({
+                                'missing_from_json': dbg.get('missing_from_json', []),
+                                'n_available_before_fill': len(dbg.get('available_before_fill', []))
+                            })
+                            with st.expander("Show processing steps cols"):
+                                steps = dbg.get('steps', {})
+                                st.json(steps)
                 num_trades = int(vc.get('BUY', 0)) + int(vc.get('SELL', 0))
                 if num_trades == 0:
                     st.warning("No BUY/SELL signals generated in the selected range. Adjust thresholds or date range.")

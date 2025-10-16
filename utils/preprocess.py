@@ -222,8 +222,8 @@ class DataPreprocessor:
         Returns:
             DataFrame with reordered and renamed columns
         """
-        print("TÉT")
-        print(data.columns)
+        # print("TÉT")
+        # print(data.columns)
         try:
             # Define robust mapping from raw to standardized names
             mapping_pairs = {
@@ -425,49 +425,191 @@ class DataPreprocessor:
             DataFrame ready for prediction
         """
         try:
+            # Make a working copy and ensure required structural columns exist
+            df = data.copy()
+            debug_steps = {}
+            debug_steps['start_cols'] = list(df.columns)
+            # Restore TradingDate from index if missing
+            if 'TradingDate' not in df.columns:
+                try:
+                    df['TradingDate'] = pd.to_datetime(df.index)
+                except Exception:
+                    pass
+            # Ensure Ticker column exists for group-based indicators
+            if 'Ticker' not in df.columns and ticker is not None:
+                df['Ticker'] = ticker
+            # Normalize OHLCV column names to expected uppercase if only lowercase exist
+            name_map = {
+                'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'MatchVolume'
+            }
+            for src, dst in name_map.items():
+                if src in df.columns and dst not in df.columns:
+                    df[dst] = df[src]
+            debug_steps['after_normalize_cols'] = list(df.columns)
+
             # Compute technical indicators to ensure required feature columns exist
             technical_indicators = TechnicalIndicators()
-            data = technical_indicators.calculate_all_indicators(data)
+            df = technical_indicators.calculate_all_indicators(df)
+            debug_steps['after_indicators_cols'] = list(df.columns)
+
+            # If indicators did not materialize (common if a lib error occurred),
+            # compute a minimal single-ticker feature set inline as a fallback.
+            try:
+                base_needed = ['ema50', 'ema200', 'rsi', 'macd_diff', 'bollinger_hband', 'bollinger_lband', 'vol_ma20', 'vol_ratio']
+                if not any(c in df.columns for c in base_needed):
+                    close_series = pd.to_numeric(df['Close'], errors='coerce')
+                    vol_series = pd.to_numeric(df['MatchVolume'], errors='coerce') if 'MatchVolume' in df.columns else None
+                    import pandas_ta as _ta
+                    df['ema50'] = _ta.ema(close_series, length=50)
+                    df['ema200'] = _ta.ema(close_series, length=200)
+                    macd_df = _ta.macd(close_series, fast=12, slow=26, signal=9)
+                    if macd_df is not None and hasattr(macd_df, 'columns'):
+                        # MACDh is histogram (diff)
+                        macd_cols = [c for c in macd_df.columns if str(c).startswith('MACDh_')]
+                        if macd_cols:
+                            df['macd_diff'] = macd_df[macd_cols[0]]
+                    df['rsi'] = _ta.rsi(close_series, length=14)
+                    bb_df = _ta.bbands(close_series, length=20, std=2.0)
+                    if bb_df is not None and hasattr(bb_df, 'columns'):
+                        upper = [c for c in bb_df.columns if str(c).startswith('BBU_')]
+                        lower = [c for c in bb_df.columns if str(c).startswith('BBL_')]
+                        if upper:
+                            df['bollinger_hband'] = bb_df[upper[0]]
+                        if lower:
+                            df['bollinger_lband'] = bb_df[lower[0]]
+                    if vol_series is not None:
+                        df['vol_ma20'] = vol_series.rolling(20).mean()
+                        df['vol_ratio'] = vol_series / df['vol_ma20']
+                    # Derived basic engineered columns
+                    if 'ema50' in df.columns:
+                        df['price_vs_ema50'] = (close_series - df['ema50']) / df['ema50']
+                    if 'ema200' in df.columns:
+                        df['price_vs_ema200'] = (close_series - df['ema200']) / df['ema200']
+                    if 'ema50' in df.columns and 'ema200' in df.columns:
+                        df['ema_ratio'] = df['ema50'] / df['ema200']
+                    if 'macd_diff' in df.columns and 'Close' in df.columns:
+                        df['macd_signal_strength'] = pd.to_numeric(df['macd_diff'], errors='coerce') / close_series.replace(0, np.nan)
+                        df['macd_trend'] = (pd.to_numeric(df['macd_diff'], errors='coerce') > 0).astype(int)
+                    if 'bollinger_hband' in df.columns and 'bollinger_lband' in df.columns:
+                        denom = (df['bollinger_hband'] - df['bollinger_lband'])
+                        df['bb_pos'] = np.where(denom != 0, (close_series - df['bollinger_lband']) / denom, np.nan)
+                    # Momentum approximations
+                    df['rsi_overbought'] = (pd.to_numeric(df.get('rsi', pd.Series(np.nan, index=df.index)), errors='coerce') > 70).astype(int)
+                    df['rsi_oversold'] = (pd.to_numeric(df.get('rsi', pd.Series(np.nan, index=df.index)), errors='coerce') < 30).astype(int)
+                    if 'vol_ratio' in df.columns:
+                        df['volume_momentum'] = df['vol_ratio'] - 1
+                    # Trend/momentum scores
+                    conds_trend = []
+                    if 'ema50' in df.columns:
+                        conds_trend.append(close_series > df['ema50'])
+                    if 'ema200' in df.columns:
+                        conds_trend.append(close_series > df['ema200'])
+                    if 'macd_diff' in df.columns:
+                        conds_trend.append(pd.to_numeric(df['macd_diff'], errors='coerce') > -0.1)
+                    if 'ema50' in df.columns and 'ema200' in df.columns:
+                        conds_trend.append(df['ema50'] > df['ema200'])
+                    if conds_trend:
+                        df['trend_score'] = np.mean(conds_trend, axis=0)
+                    conds_mom = []
+                    if 'bb_pos' in df.columns:
+                        conds_mom.append(pd.to_numeric(df['bb_pos'], errors='coerce') >= 0.3)
+                    if 'vol_ratio' in df.columns:
+                        conds_mom.append(pd.to_numeric(df['vol_ratio'], errors='coerce') >= 0.8)
+                    if 'rsi' in df.columns:
+                        rsi_vals = pd.to_numeric(df['rsi'], errors='coerce')
+                        conds_mom.append(rsi_vals > 30)
+                        conds_mom.append(rsi_vals < 80)
+                    if conds_mom:
+                        df['momentum_score'] = np.mean(conds_mom, axis=0)
+                    debug_steps['after_minimal_fallback_cols'] = list(df.columns)
+            except Exception:
+                pass
             # Merge financial data if provided
             if financial_data is not None and ticker is not None:
-                data = self.merge_financial_data(data, financial_data, ticker)
+                df = self.merge_financial_data(df, financial_data, ticker)
+            debug_steps['after_merge_cols'] = list(df.columns)
             
             # Prepare quantitative data
-            data = self.prepare_quantitative_data(data)
+            df = self.prepare_quantitative_data(df)
+            debug_steps['after_prepare_cols'] = list(df.columns)
             
             # Handle missing values
-            data = self.handle_missing_values(data)
-            print("TÉT1")
-            pd.set_option("display.max_columns", None)
-            print(data.head(10))            
-            # Reorder and rename columns
-            data = self.reorder_and_rename_columns(data)
-            print("TÉT2")
-            pd.set_option("display.max_columns", None)
-            print(data.head(10))
-            # Load persisted feature columns from training
+            df = self.handle_missing_values(df)
+            debug_steps['after_missing_cols'] = list(df.columns)
+                      
+            # Determine expected feature columns (prefer JSON)
             feature_cols = []
             try:
                 import json
-                features_path = os.path.join(os.path.dirname(Config.MODEL_PATH), 'feature_columns.json')
-                if os.path.exists(features_path):
-                    with open(features_path, 'r', encoding='utf-8') as f:
-                        feature_cols = json.load(f)
-            except Exception as _:
+                features_json_path = os.path.join(os.path.dirname(Config.MODEL_PATH), 'feature_columns.json')
+                if os.path.exists(features_json_path):
+                    with open(features_json_path, 'r', encoding='utf-8') as f:
+                        loaded = json.load(f)
+                        if isinstance(loaded, list) and loaded:
+                            feature_cols = loaded
+            except Exception:
                 feature_cols = []
-            
-            # Fallback to canonical order intersection if persisted list missing
-            if not feature_cols:
-                feature_cols = [c for c in self.FEATURE_ORDER if c in data.columns]
 
-            # Keep only feature columns in correct order
-            data = data[[c for c in feature_cols if c in data.columns]].copy()
+            # Important: For prediction, skip aggressive reorder/rename to avoid dropping engineered columns.
+            # We'll select features directly from the current frame.
+            df_before_rename = df.copy()
+            # print("TÉT2")
+            # pd.set_option("display.max_columns", None)
+            # print(data.head(10))
+            # Determine feature columns strictly from feature_columns.json if present
+            feature_cols = []
+            try:
+                # feature_cols may have been read above; if still empty, load again or fallback
+                if not feature_cols:
+                    import json
+                    features_json_path = os.path.join(os.path.dirname(Config.MODEL_PATH), 'feature_columns.json')
+                    if os.path.exists(features_json_path):
+                        with open(features_json_path, 'r', encoding='utf-8') as f:
+                            loaded = json.load(f)
+                            if isinstance(loaded, list) and loaded:
+                                feature_cols = loaded
+                # If JSON missing, fall back to model metadata or pkls
+                if not feature_cols and os.path.exists(Config.MODEL_PATH):
+                    model = joblib.load(Config.MODEL_PATH)
+                    if hasattr(model, 'feature_names_in_'):
+                        feature_cols = list(getattr(model, 'feature_names_in_'))
+                if not feature_cols:
+                    fn_path = os.path.join(os.path.dirname(Config.MODEL_PATH), 'feature_names.pkl')
+                    if os.path.exists(fn_path):
+                        feature_cols = joblib.load(fn_path)
+                if not feature_cols:
+                    feature_cols = [c for c in self.FEATURE_ORDER if c in df.columns]
+            except Exception:
+                feature_cols = [c for c in self.FEATURE_ORDER if c in df.columns]
+
+            # Ensure all expected features exist; create missing with 0.0, preserve exact order
+            # Debug snapshot before filling zeros
+            df_before_fill = df.copy()
+            missing_list = [c for c in feature_cols if c not in df_before_fill.columns]
+
+            for col in feature_cols:
+                if col not in df.columns:
+                    df[col] = 0.0
+            df = df[feature_cols].copy()
+            debug_steps['selected_feature_cols'] = feature_cols
 
             # Scale features with saved scaler
-            data = self.scale_features(data, fit_scaler=False)
+            df = self.scale_features(df, fit_scaler=False)
             
             # Get the latest row for prediction
-            latest_data = data.iloc[-1:].copy()
+            latest_data = df.iloc[-1:].copy()
+
+            # Save debug info to Streamlit session if available
+            try:
+                import streamlit as _st
+                _st.session_state.prediction_feature_debug = {
+                    'available_before_fill': list(df_before_fill.columns),
+                    'missing_from_json': missing_list,
+                    'feature_order_json': feature_cols,
+                    'steps': debug_steps
+                }
+            except Exception:
+                pass
             
             logger.info("Prepared prediction data")
             return latest_data
@@ -497,8 +639,8 @@ class DataPreprocessor:
             
             # Step 3: Reorder and rename columns
             data = self.reorder_and_rename_columns(data)
-            print("TÉT")
-            print(data.columns)
+            # print("TÉT")
+            # print(data.columns)
             # Step 4: Remove rows with missing target variables
             target_cols = [col for col in data.columns if col.startswith('target_binary_')]
             if target_cols:

@@ -27,6 +27,7 @@ class SignalGenerator:
         self.model = None
         self.buy_threshold = Config.BUY_THRESHOLD
         self.sell_threshold = Config.SELL_THRESHOLD
+        self.enable_technical_filters = True
         
         # Load model if exists
         self.load_model()
@@ -229,8 +230,8 @@ class SignalGenerator:
                 signal_info['confidence'] = 1 - abs(probability - 0.5) * 2
                 signal_info['reason'] = f'Moderate probability: {probability:.3f}'
             
-            # Apply technical analysis filters if available
-            if technical_indicators:
+            # Apply technical analysis filters if enabled and available
+            if self.enable_technical_filters and technical_indicators:
                 signal_info = self.apply_technical_filters(signal_info, technical_indicators)
             
             return signal_info
@@ -313,10 +314,11 @@ class SignalGenerator:
                     signal_info['reason'] += ' (Low volume)'
             
             return signal_info
-            
+        
         except Exception as e:
             logger.error(f"Error applying technical filters: {e}")
             return signal_info
+        return signal_info
     
     def log_signal(self, ticker: str, signal_info: Dict):
         """
