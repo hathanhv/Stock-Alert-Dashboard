@@ -49,8 +49,6 @@ Thumbs.db
 *.joblib
 *.h5
 *.hdf5
-*.jpg
-*.png
 
 # Logs
 *.log

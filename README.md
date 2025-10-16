@@ -3,12 +3,12 @@
 Realtime monitoring, ML‑based signals, and backtesting built with Streamlit.
 
 ### Demo
-![Dashboard Demo](dashboard3.jpg)
-![Dashboard Demo](dashboard1.jpg)
-![Dashboard Demo](dashboard2.jpg)
+![Dashboard Demo](images/dashboard3.jpg)
+![Dashboard Demo](images/dashboard1.jpg)
+![Dashboard Demo](images/dashboard2.jpg)
 
-![Backtest Demo](backtest1.png)
-![Backtest Demo](backtest2.png)
+![Backtest Demo](images/backtest1.png)
+![Backtest Demo](images/backtest2.png)
 
 
 ### 1) Features
